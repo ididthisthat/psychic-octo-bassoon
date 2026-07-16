@@ -1,7 +1,7 @@
 // Token parsing helpers. Pure, no deps.
 
 // JWT (eyJ….….…) or a 32-hex apikey.
-export function looksLikeToken(v: string): boolean {
+function looksLikeToken(v: string): boolean {
 	return /^eyJ[\w-]+\.[\w-]+\.[\w-]+$/.test(v) || /^[a-f0-9]{32}$/i.test(v);
 }
 

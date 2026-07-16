@@ -16,7 +16,8 @@ import {
 	type DeadRow,
 } from "./db.ts";
 import { extractKey } from "./keys.ts";
-import { pickAccount } from "./store.ts";
+import { startMintScheduler, startPeriodicReport } from "./mint-scheduler.ts";
+import { pickAccount, type PickResult } from "./store.ts";
 import { startTelegram } from "./telegram.ts";
 
 const UPSTREAM = "https://api.oxlo.ai/v1/chat/completions";
@@ -54,19 +55,14 @@ const secretEq = (given: string, configured: string): boolean => {
 	return a.length === b.length && timingSafeEqual(a, b);
 };
 
-const send = (token: string, body: string) =>
-	fetch(UPSTREAM, {
+const sendTo = (url: string) => (token: string, body: string) =>
+	fetch(url, {
 		method: "POST",
 		headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
 		body,
 	});
-
-const sendImage = (token: string, body: string) =>
-	fetch(IMAGE_UPSTREAM, {
-		method: "POST",
-		headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-		body,
-	});
+const send = sendTo(UPSTREAM);
+const sendImage = sendTo(IMAGE_UPSTREAM);
 
 async function probe(token: string): Promise<number> {
 	try {
@@ -119,22 +115,28 @@ if (import.meta.main) {
 		await refresh();
 	}
 
+
+	const doMint = async (): Promise<{ added: boolean; id: string }> => {
+		const jwt = await mintToken();
+		const r = await upsertAccount(jwt);
+		await refresh();
+		return r;
+	};
 	// Throttled auto-mint: fire-and-forget, at most one mint in flight,
 	// with a 3-5min random cooldown.
 	let minting = false;
 	let lastMintAt = 0;
-	const MINT_COOLDOWN_MS = 180_000 + Math.floor(Math.random() * 120_000); // 3-5 min
+	let cooldownMs = 240_000; // re-randomized after each mint
 	const refillPool = async (): Promise<void> => {
 		if (minting) return;
 		const now = Date.now();
-		if (now - lastMintAt < MINT_COOLDOWN_MS) return;
+		if (now - lastMintAt < cooldownMs) return;
 		if (tokens.length >= MIN_POOL_SIZE) return;
 		minting = true;
 		try {
-			const jwt = await mintToken();
-			await upsertAccount(jwt);
-			await refresh();
+			await doMint();
 			lastMintAt = Date.now();
+			cooldownMs = 180_000 + Math.floor(Math.random() * 120_000);
 			console.log(`auto-minted: pool now ${tokens.length}`);
 			bot?.notify(`Auto-minted new Oxlo account. Pool: ${tokens.length} active.`);
 		} catch (e) {
@@ -164,16 +166,41 @@ if (import.meta.main) {
 		dead: async () => fmtDead(await listDead()),
 		probe: probeAll,
 		addToken: addRaw,
-		mint: async () => {
-			const jwt = await mintToken();
-			return addRaw(jwt);
-		},
+		mint: () => doMint(),
 	});
 
-	Bun.serve({
+	// Proactive scheduler: mint every 50-60 min, independent of request load.
+	startMintScheduler(bot, async () => {
+		await doMint();
+		console.log(`scheduled-mint: pool now ${tokens.length}`);
+		bot?.notify(`Scheduled mint: new Oxlo account. Pool: ${tokens.length} active.`);
+	});
+
+	// Periodic status push to Telegram every ~6h with jitter.
+	if (bot) {
+		startPeriodicReport(bot, async () =>
+			`Oxlo proxy: ${tokens.length} active.\n${fmtActive(await listActive())}`);
+	}
+
+	const bookkeep = async (pick: PickResult): Promise<void> => {
+		try {
+			for (const d of pick.dead) {
+				await moveDead(accountIdFrom(d.token), d.token, d.reason);
+				bot?.notify(`Oxlo account ${accountIdFrom(d.token).slice(0, 12)} died: ${d.reason}`);
+			}
+			for (const s of pick.skipped) await markError(accountIdFrom(s.token), String(s.status));
+			if (pick.res.status === 200) await markOk(accountIdFrom(pick.token));
+			if (pick.dead.length > 0) await refresh();
+			cursor = Math.max(0, tokens.indexOf(pick.token));
+			if (tokens.length < MIN_POOL_SIZE) await refillPool();
+		} catch (e) {
+			console.error("pool bookkeeping failed:", e instanceof Error ? e.message : e);
+		}
+	};
+
+	const server = Bun.serve({
 		hostname: HOST,
 		port: PORT,
-		idleTimeout: 255,
 		async fetch(req) {
 			const { pathname } = new URL(req.url);
 
@@ -223,26 +250,19 @@ if (import.meta.main) {
 					return Response.json({ error: "invalid api key" }, { status: 401 });
 				}
 				if (tokens.length === 0) {
-					return Response.json({ error: "No Oxlo accounts. Mint one via /admin/mint." }, { status: 503 });
+					void refillPool();
+					const retry = String(lastMintAt > 0
+						? Math.max(60, Math.ceil((lastMintAt + cooldownMs - Date.now()) / 1000))
+						: 180);
+					return Response.json(
+						{ error: "No Oxlo accounts available." },
+						{ status: 503, headers: { "Retry-After": retry } }
+					);
 				}
 				const body = await req.text();
 				const pick = await pickAccount(tokens, cursor, (t) => sendImage(t, body));
 
-				void (async () => {
-					try {
-						for (const d of pick.dead) {
-							await moveDead(accountIdFrom(d.token), d.token, d.reason);
-							bot?.notify(`Oxlo account ${accountIdFrom(d.token).slice(0, 12)} died: ${d.reason}`);
-						}
-						for (const s of pick.skipped) await markError(accountIdFrom(s.token), String(s.status));
-						if (pick.res.status === 200) await markOk(accountIdFrom(pick.token));
-						if (pick.dead.length > 0) await refresh();
-						cursor = Math.max(0, tokens.indexOf(pick.token));
-						if (tokens.length < MIN_POOL_SIZE) await refillPool();
-					} catch (e) {
-						console.error("pool bookkeeping failed:", e instanceof Error ? e.message : e);
-					}
-				})();
+				void bookkeep(pick);
 
 				if (pick.res.status !== 200) {
 					bot?.notify(`Oxlo: all accounts unusable (HTTP ${pick.res.status}). Will auto-mint when cooldown expires.`);
@@ -259,7 +279,14 @@ if (import.meta.main) {
 					return Response.json({ error: "invalid api key" }, { status: 401 });
 				}
 				if (tokens.length === 0) {
-					return Response.json({ error: "No Oxlo accounts. Mint one via /admin/mint." }, { status: 503 });
+					void refillPool();
+					const retry = String(lastMintAt > 0
+						? Math.max(60, Math.ceil((lastMintAt + cooldownMs - Date.now()) / 1000))
+						: 180);
+					return Response.json(
+						{ error: "No Oxlo accounts available." },
+						{ status: 503, headers: { "Retry-After": retry } }
+					);
 				}
 				const parsed = await req.json();
 				if (parsed.model && !MODELS.includes(parsed.model)) {
@@ -268,21 +295,7 @@ if (import.meta.main) {
 				const body = JSON.stringify(parsed);
 				const pick = await pickAccount(tokens, cursor, (t) => send(t, body));
 
-				void (async () => {
-					try {
-						for (const d of pick.dead) {
-							await moveDead(accountIdFrom(d.token), d.token, d.reason);
-							bot?.notify(`Oxlo account ${accountIdFrom(d.token).slice(0, 12)} died: ${d.reason}`);
-						}
-						for (const s of pick.skipped) await markError(accountIdFrom(s.token), String(s.status));
-						if (pick.res.status === 200) await markOk(accountIdFrom(pick.token));
-						if (pick.dead.length > 0) await refresh();
-						cursor = Math.max(0, tokens.indexOf(pick.token));
-						if (tokens.length < MIN_POOL_SIZE) await refillPool();
-					} catch (e) {
-						console.error("pool bookkeeping failed:", e instanceof Error ? e.message : e);
-					}
-				})();
+				void bookkeep(pick);
 
 				if (pick.res.status !== 200) {
 					bot?.notify(`Oxlo: all accounts unusable (HTTP ${pick.res.status}). Will auto-mint when cooldown expires.`);
@@ -298,4 +311,7 @@ if (import.meta.main) {
 	});
 
 	console.log(`oxlo-proxy on http://${HOST}:${PORT}/v1  (${tokens.length} active${bot ? ", telegram on" : ""})`);
+
+	process.on("SIGTERM", () => { server.stop(); process.exit(0); });
+	process.on("SIGINT", () => { server.stop(); process.exit(0); });
 }

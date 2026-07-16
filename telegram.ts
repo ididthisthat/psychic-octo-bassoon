@@ -18,7 +18,9 @@ dead   — dead account archive with reasons
 probe  — live-test each active account (costs 1 req each)
 add <token> — add a raw JWT or devtools blob
 mint  — auto-mint a new account via mail.tm
-help  — this message`;
+help  — this message
+
+Auto-mint runs every 50-60 min. Status report every ~6h.`;
 
 export function startTelegram(h: TgHandlers): Notifier | null {
 	const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
@@ -31,32 +33,32 @@ export function startTelegram(h: TgHandlers): Notifier | null {
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
 		});
-	const send = (text: string) => api("sendMessage", { chat_id: CHAT, text });
+	const send = (text: string) => api("sendMessage", { chat_id: CHAT, text: text.length > 4000 ? text.slice(0, 3997) + "..." : text });
 
 	const handle = async (text: string): Promise<void> => {
 		const [cmd, ...rest] = text.replace(/^\//, "").trim().split(/\s+/);
 		const reply = (msg: string) => send(msg).catch(() => {});
 		try {
 			if (cmd === "status" || cmd === "list") {
-				return void (await reply(await h.status()));
+				await reply(await h.status()); return;
 			}
 			if (cmd === "dead") {
 				const d = await h.dead();
-				return void (await reply(d || "✅ No dead accounts."));
+				await reply(d || "✅ No dead accounts."); return;
 			}
 			if (cmd === "probe") {
 				await reply("🔍 Probing...");
-				return void (await reply(await h.probe()));
+				await reply(await h.probe()); return;
 			}
-			if (cmd === "help") return void (await reply(HELP));
+			if (cmd === "help") { await reply(HELP); return; }
 			if (cmd === "add") {
 				const r = await h.addToken(rest.join(" "));
-				return void (await reply(r.added ? `✅ Added \`${r.id}\`` : `⚠️ Already have \`${r.id}\``));
+				await reply(r.added ? `✅ Added \`${r.id}\`` : `⚠️ Already have \`${r.id}\``); return;
 			}
 			if (cmd === "mint") {
 				await reply("⏳ Minting via mail.tm...");
 				const r = await h.mint();
-				return void (await reply(r.added ? `✅ Minted \`${r.id}\`` : `⚠️ Already have \`${r.id}\``));
+				await reply(r.added ? `✅ Minted \`${r.id}\`` : `⚠️ Already have \`${r.id}\``); return;
 			}
 			await reply(HELP);
 		} catch (e) {

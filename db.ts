@@ -36,6 +36,11 @@ export async function initDb(): Promise<void> {
 			reason   TEXT NOT NULL,
 			died_at  TIMESTAMPTZ DEFAULT now()
 		)`;
+	await sql`
+		CREATE TABLE IF NOT EXISTS mint_log (
+			kind       TEXT PRIMARY KEY,
+			minted_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`;
 }
 
 export async function loadActive(): Promise<string[]> {
@@ -78,4 +83,16 @@ export async function listActive(): Promise<AccountRow[]> {
 
 export async function listDead(): Promise<DeadRow[]> {
 	return (await sql`SELECT id, reason, died_at FROM dead_accounts ORDER BY died_at DESC`) as DeadRow[];
+}
+
+export async function getLastMint(kind: string): Promise<Date | null> {
+	const rows = await sql`SELECT minted_at FROM mint_log WHERE kind = ${kind}` as { minted_at: Date }[];
+	if (rows.length === 0) return null;
+	return rows[0].minted_at;
+}
+
+export async function recordMint(kind: string): Promise<void> {
+	await sql`
+		INSERT INTO mint_log (kind, minted_at) VALUES (${kind}, now())
+		ON CONFLICT (kind) DO UPDATE SET minted_at = now()`;
 }
