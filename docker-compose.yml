@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: oxlo
+      POSTGRES_DB: oxlo
+    volumes:
+      - ./data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  oxlo-proxy:
+    build: .
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgres://postgres:oxlo@db:5432/oxlo
+    ports:
+      - "127.0.0.1:8761:8761"
+    env_file:
+      - .env
+    restart: unless-stopped

@@ -1,0 +1,9 @@
+{
+	"name": "oxlo-proxy",
+	"version": "0.1.0",
+	"type": "module",
+	"scripts": {
+		"start": "bun run server.ts",
+		"test": "bun store.test.ts && bun server.test.ts"
+	}
+}
