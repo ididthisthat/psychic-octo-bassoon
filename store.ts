@@ -50,9 +50,14 @@ export async function pickAccount(
 			dead.push({ token, reason: "expiring" });
 			continue;
 		}
-
-		const res = await send(token);
-		if (res.status === 200) return { token, res, dead, skipped };
+		let res: Response;
+		try {
+			res = await send(token);
+		} catch (e) {
+			last = { token, status: 502, text: `upstream fetch failed: ${e instanceof Error ? e.message : String(e)}`, contentType: null };
+			skipped.push({ token, status: 0 });
+			continue;
+		}
 
 		const text = await res.text();
 		last = { token, status: res.status, text, contentType: res.headers.get("content-type") };
