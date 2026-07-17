@@ -12,10 +12,13 @@ import {
 	markOk,
 	moveDead,
 	upsertAccount,
+	getLastMint,
+	isMintPaused,
+	setMintPause,
+	clearMintPause,
 	type AccountRow,
 	type DeadRow,
 } from "./db.ts";
-import { extractKey } from "./keys.ts";
 import { startMintScheduler, startPeriodicReport } from "./mint-scheduler.ts";
 import { pickAccount, type PickResult } from "./store.ts";
 import { startTelegram } from "./telegram.ts";
@@ -162,14 +165,27 @@ if (import.meta.main) {
 	};
 
 	const bot = startTelegram({
-		status: async () => `Oxlo proxy: ${tokens.length} active.\n${fmtActive(await listActive())}`,
+		status: async () => {
+			const [active, lastMint, paused] = await Promise.all([
+				listActive(),
+				getLastMint("oxlo"),
+				isMintPaused("oxlo"),
+			]);
+			const mintAgo = lastMint ? ago(lastMint) : "never";
+			return `Oxlo proxy: ${tokens.length} active.\n` +
+				`Last mint: ${mintAgo}\n` +
+				(paused ? "\u23F8 Minting paused.\n" : "") +
+				fmtActive(active);
+		},
 		dead: async () => fmtDead(await listDead()),
 		probe: probeAll,
 		addToken: addRaw,
 		mint: () => doMint(),
+		setPause: async () => setMintPause("oxlo"),
+		clearPause: async () => clearMintPause("oxlo"),
 	});
 
-	// Proactive scheduler: mint every 50-60 min, independent of request load.
+	// Proactive scheduler: mint every 80-90 min, independent of request load.
 	startMintScheduler(bot, async () => {
 		await doMint();
 		console.log(`scheduled-mint: pool now ${tokens.length}`);
@@ -178,8 +194,18 @@ if (import.meta.main) {
 
 	// Periodic status push to Telegram every ~6h with jitter.
 	if (bot) {
-		startPeriodicReport(bot, async () =>
-			`Oxlo proxy: ${tokens.length} active.\n${fmtActive(await listActive())}`);
+		startPeriodicReport(bot, async () => {
+			const [active, lastMint, paused] = await Promise.all([
+				listActive(),
+				getLastMint("oxlo"),
+				isMintPaused("oxlo"),
+			]);
+			const mintAgo = lastMint ? ago(lastMint) : "never";
+			return `Oxlo proxy: ${tokens.length} active.\n` +
+				`Last mint: ${mintAgo}\n` +
+				(paused ? "\u23F8 Minting paused.\n" : "") +
+				fmtActive(active);
+		});
 	}
 
 	const bookkeep = async (pick: PickResult): Promise<void> => {

@@ -8,8 +8,10 @@ export type TgHandlers = {
 	probe: () => Promise<string>;
 	addToken: (raw: string) => Promise<{ added: boolean; id: string }>;
 	mint: () => Promise<{ added: boolean; id: string }>;
+	setPause: (kind: string) => Promise<void>;
+	clearPause: (kind: string) => Promise<void>;
 };
-export type Notifier = { notify: (msg: string) => void };
+export type Notifier = { notify: (msg: string, opts?: { throttle?: boolean }) => void };
 
 const HELP = `cmds:
 status — active accounts + last-ok timestamps
@@ -17,10 +19,12 @@ list   — same as status
 dead   — dead account archive with reasons
 probe  — live-test each active account (costs 1 req each)
 add <token> — add a raw JWT or devtools blob
-mint  — auto-mint a new account via mail.tm
-help  — this message
+mint   — auto-mint a new account via mail.tm
+pause  — stop auto-minting
+resume — resume auto-minting
+help   — this message
 
-Auto-mint runs every 50-60 min. Status report every ~6h.`;
+Auto-mint runs every 80-90 min. Status report every ~6h.`;
 
 export function startTelegram(h: TgHandlers): Notifier | null {
 	const TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? "";
@@ -60,6 +64,14 @@ export function startTelegram(h: TgHandlers): Notifier | null {
 				const r = await h.mint();
 				await reply(r.added ? `✅ Minted \`${r.id}\`` : `⚠️ Already have \`${r.id}\``); return;
 			}
+			if (cmd === "pause") {
+				await h.setPause("oxlo");
+				await reply("⏸ Minting paused."); return;
+			}
+			if (cmd === "resume") {
+				await h.clearPause("oxlo");
+				await reply("▶ Minting resumed."); return;
+			}
 			await reply(HELP);
 		} catch (e) {
 			await reply(`❌ ${e instanceof Error ? e.message : String(e)}`);
@@ -86,10 +98,12 @@ export function startTelegram(h: TgHandlers): Notifier | null {
 
 	let last = 0;
 	return {
-		notify: (msg: string) => {
-			const now = Date.now();
-			if (now - last < 60_000) return; // throttle: at most one alert/min
-			last = now;
+		notify: (msg: string, opts?: { throttle?: boolean }) => {
+			if (opts?.throttle !== false) {
+				const now = Date.now();
+				if (now - last < 60_000) return;
+				last = now;
+			}
 			void send(msg).catch(() => {});
 		},
 	};

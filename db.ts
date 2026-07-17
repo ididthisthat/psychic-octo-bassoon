@@ -41,6 +41,19 @@ export async function initDb(): Promise<void> {
 			kind       TEXT PRIMARY KEY,
 			minted_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`;
+	await sql`
+		CREATE TABLE IF NOT EXISTS mint_errors (
+			id         SERIAL PRIMARY KEY,
+			kind       TEXT NOT NULL,
+			email      TEXT,
+			error      TEXT NOT NULL,
+			created_at TIMESTAMPTZ DEFAULT now()
+		)`;
+	await sql`
+		CREATE TABLE IF NOT EXISTS mint_pause (
+			kind       TEXT PRIMARY KEY,
+			paused_at  TIMESTAMPTZ DEFAULT now()
+		)`;
 }
 
 export async function loadActive(): Promise<string[]> {
@@ -85,14 +98,32 @@ export async function listDead(): Promise<DeadRow[]> {
 	return (await sql`SELECT id, reason, died_at FROM dead_accounts ORDER BY died_at DESC`) as DeadRow[];
 }
 
+export async function recordMint(kind: string): Promise<void> {
+	await sql`
+		INSERT INTO mint_log (kind, minted_at) VALUES (${kind}, now())
+		ON CONFLICT (kind) DO UPDATE SET minted_at = now()`;
+}
+
+export async function logMintError(kind: string, email: string | null, error: string): Promise<void> {
+	await sql`INSERT INTO mint_errors (kind, email, error) VALUES (${kind}, ${email}, ${error})`;
+}
+
+export async function setMintPause(kind: string): Promise<void> {
+	await sql`INSERT INTO mint_pause (kind) VALUES (${kind}) ON CONFLICT (kind) DO NOTHING`;
+}
+
+export async function clearMintPause(kind: string): Promise<void> {
+	await sql`DELETE FROM mint_pause WHERE kind = ${kind}`;
+}
+
+export async function isMintPaused(kind: string): Promise<boolean> {
+	const rows = await sql`SELECT 1 FROM mint_pause WHERE kind = ${kind} LIMIT 1`;
+	return rows.length > 0;
+}
+
 export async function getLastMint(kind: string): Promise<Date | null> {
 	const rows = await sql`SELECT minted_at FROM mint_log WHERE kind = ${kind}` as { minted_at: Date }[];
 	if (rows.length === 0) return null;
 	return rows[0].minted_at;
 }
 
-export async function recordMint(kind: string): Promise<void> {
-	await sql`
-		INSERT INTO mint_log (kind, minted_at) VALUES (${kind}, now())
-		ON CONFLICT (kind) DO UPDATE SET minted_at = now()`;
-}
